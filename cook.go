@@ -3,6 +3,7 @@ package index
 import (
 	"fmt"
 	"go/build"
+	"go/build/constraint"
 	"go/token"
 	"io"
 	"io/fs"
@@ -10,6 +11,7 @@ import (
 	"os"
 	pathpkg "path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -89,16 +91,17 @@ func Cook(ctxt *build.Context, rp *RawPackage, mode ImportMode) (*build.Package,
 	// We need to do a second round of bad file processing.
 	var badGoError error
 	badFiles := make(map[string]bool)
-	badFile := func(tf TaggedFile, err error) {
+	badFile := func(name string, err error) {
 		if badGoError == nil {
 			badGoError = err
 		}
-		if !badFiles[tf.Name] {
-			p.InvalidGoFiles = append(p.InvalidGoFiles, tf.Name)
-			badFiles[tf.Name] = true
+		if !badFiles[name] {
+			p.InvalidGoFiles = append(p.InvalidGoFiles, name)
+			badFiles[name] = true
 		}
 	}
 
+	var Sfiles []string // files with ".S"(capital S)/.sx(capital s equivalent for case insensitive filesystems)
 	var firstCommentFile string
 	embedPos := make(map[string][]token.Position)
 	testEmbedPos := make(map[string][]token.Position)
@@ -106,7 +109,8 @@ func Cook(ctxt *build.Context, rp *RawPackage, mode ImportMode) (*build.Package,
 	importPos := make(map[string][]token.Position)
 	testImportPos := make(map[string][]token.Position)
 	xTestImportPos := make(map[string][]token.Position)
-	for _, tf := range rp.GoFiles {
+	allTags := make(map[string]bool)
+	for _, tf := range rp.SourceFiles {
 		if tf.IgnoreFile {
 			if strings.HasPrefix(tf.Name, "_") || strings.HasPrefix(tf.Name, ".") {
 				// not due to build constraints - don't report
@@ -114,25 +118,62 @@ func Cook(ctxt *build.Context, rp *RawPackage, mode ImportMode) (*build.Package,
 				p.IgnoredGoFiles = append(p.IgnoredGoFiles, tf.Name)
 			}
 			continue
+		} else if tf.Error != nil {
+			badFile(tf.Name, tf.Error)
 		}
 
-		// *****
-		//
-		//
-		//
-		//
-		//
-		//Match pattern here.
+		var shouldBuild = true
+		if tf.GoBuildConstraint != "" {
+			x, err := constraint.Parse(tf.GoBuildConstraint)
+			if err != nil {
+				return nil, fmt.Errorf("%s: parsing //go:build line: %v", tf.Name, err)
+			}
+			shouldBuild = eval(ctxt, x, allTags)
+		} else if len(tf.PlusBuildConstraints) > 0 {
+			for _, text := range tf.PlusBuildConstraints {
+				if x, err := constraint.Parse(text); err == nil {
+					if !eval(ctxt, x, allTags) {
+						shouldBuild = false
+					}
+				}
+			}
+		}
+		ext := nameExt(tf.Name)
+		if !shouldBuild {
+			if strings.HasPrefix(tf.Name, "_") || strings.HasPrefix(tf.Name, ".") {
+				// not due to build constraints - don't report
+			} else if ext == ".go" {
+				p.IgnoredGoFiles = append(p.IgnoredGoFiles, tf.Name)
+			} else if fileListForExtBP(p, ext) != nil {
+				p.IgnoredOtherFiles = append(p.IgnoredOtherFiles, tf.Name)
+			}
+			continue
+		}
+
+		// Going to save the file. For non-Go files, can stop here.
+		switch ext {
+		case ".go":
+			// keep going
+		case ".S", ".sx":
+			// special case for cgo, handled at end
+			Sfiles = append(Sfiles, tf.Name)
+			continue
+		default:
+			if list := fileListForExtBP(p, ext); list != nil {
+				*list = append(*list, tf.Name)
+			}
+			continue
+		}
 
 		if mode&ImportComment != 0 {
 			com, err := strconv.Unquote(tf.QuotedImportComment)
 			if err != nil {
-				badFile(tf, fmt.Errorf("%s:%d: cannot parse import comment", tf.Name, tf.QuotedImportCommentLine))
+				badFile(tf.Name, fmt.Errorf("%s:%d: cannot parse import comment", tf.Name, tf.QuotedImportCommentLine))
 			} else if p.ImportComment == "" {
 				p.ImportComment = com
 				firstCommentFile = tf.Name
 			} else if p.ImportComment != com {
-				badFile(tf, fmt.Errorf("found import comments %q (%s) and %q (%s) in %s", p.ImportComment, firstCommentFile, com, tf, p.Dir))
+				badFile(tf.Name, fmt.Errorf("found import comments %q (%s) and %q (%s) in %s", p.ImportComment, firstCommentFile, com, tf, p.Dir))
 			}
 		}
 
@@ -149,14 +190,14 @@ func Cook(ctxt *build.Context, rp *RawPackage, mode ImportMode) (*build.Package,
 		for _, imp := range tf.Imports {
 			if imp.Path == "C" {
 				if isTest {
-					badFile(tf, fmt.Errorf("use of cgo in test %s not supported", tf.Name))
+					badFile(tf.Name, fmt.Errorf("use of cgo in test %s not supported", tf.Name))
 					continue
 				}
 				isCgo = true
 
 				if imp.Doc != "" {
 					if err := saveCgo(ctxt, tf.Name, p, imp.Doc); err != nil {
-						badFile(tf, err)
+						badFile(tf.Name, err)
 					}
 				}
 
@@ -167,7 +208,7 @@ func Cook(ctxt *build.Context, rp *RawPackage, mode ImportMode) (*build.Package,
 		var importMap, embedMap map[string][]token.Position
 		switch {
 		case isCgo:
-			//allTags["cgo"] = true
+			allTags["cgo"] = true
 			if ctxt.CgoEnabled {
 				fileList = &p.CgoFiles
 				importMap = importPos
@@ -202,15 +243,39 @@ func Cook(ctxt *build.Context, rp *RawPackage, mode ImportMode) (*build.Package,
 		}
 	}
 
-	/// ******** Examine other file types here.....
+	p.EmbedPatterns, p.EmbedPatternPos = cleanDecls(embedPos)
+	p.TestEmbedPatterns, p.TestEmbedPatternPos = cleanDecls(testEmbedPos)
+	p.XTestEmbedPatterns, p.XTestEmbedPatternPos = cleanDecls(xTestEmbedPos)
 
-	if ctxt.Compiler == "gccgo" && p.Goroot {
-		// gccgo has no sources for GOROOT packages.
-		return p, nil
+	p.Imports, p.ImportPos = cleanDecls(importPos)
+	p.TestImports, p.TestImportPos = cleanDecls(testImportPos)
+	p.XTestImports, p.XTestImportPos = cleanDecls(xTestImportPos)
+
+	for tag := range allTags {
+		p.AllTags = append(p.AllTags, tag)
 	}
+	sort.Strings(p.AllTags)
 
-	return p, nil
+	if len(p.CgoFiles) > 0 {
+		p.SFiles = append(p.SFiles, Sfiles...)
+		sort.Strings(p.SFiles)
+	} else {
+		p.IgnoredOtherFiles = append(p.IgnoredOtherFiles, Sfiles...)
+		sort.Strings(p.IgnoredOtherFiles)
+	}
+	// TODO Remove SFiles if we're not using cgo.
+
+	if badGoError != nil {
+		return p, badGoError
+	}
+	if len(p.GoFiles)+len(p.CgoFiles)+len(p.TestGoFiles)+len(p.XTestGoFiles) == 0 {
+		return p, &NoGoError{p.Dir}
+	}
+	return p, pkgerr
 }
+
+/////
+///// TODO(matloob) delete all this stuff if we end up merging back into go/build
 
 // joinPath calls joinPath (if not nil) or else filepath.Join.
 func joinPath(elem ...string) string {
@@ -306,7 +371,7 @@ func saveCgo(ctxt *build.Context, filename string, di *build.Package, importComm
 		if len(cond) > 0 {
 			ok := false
 			for _, c := range cond {
-				if ctxt.matchAuto(c, nil) {
+				if matchAuto(ctxt, c, nil) {
 					ok = true
 					break
 				}
@@ -330,7 +395,7 @@ func saveCgo(ctxt *build.Context, filename string, di *build.Package, importComm
 		switch verb {
 		case "CFLAGS", "CPPFLAGS", "CXXFLAGS", "FFLAGS", "LDFLAGS":
 			// Change relative paths to absolute.
-			ctxt.makePathsAbsolute(args, di.Dir)
+			makePathsAbsolute(args, di.Dir)
 		}
 
 		switch verb {
@@ -351,4 +416,99 @@ func saveCgo(ctxt *build.Context, filename string, di *build.Package, importComm
 		}
 	}
 	return nil
+}
+
+func makePathsAbsolute(args []string, srcDir string) {
+	nextPath := false
+	for i, arg := range args {
+		if nextPath {
+			if !filepath.IsAbs(arg) {
+				args[i] = filepath.Join(srcDir, arg)
+			}
+			nextPath = false
+		} else if strings.HasPrefix(arg, "-I") || strings.HasPrefix(arg, "-L") {
+			if len(arg) == 2 {
+				nextPath = true
+			} else {
+				if !filepath.IsAbs(arg[2:]) {
+					args[i] = arg[:2] + filepath.Join(srcDir, arg[2:])
+				}
+			}
+		}
+	}
+}
+
+// matchAuto interprets text as either a +build or //go:build expression (whichever works),
+// reporting whether the expression matches the build context.
+//
+// matchAuto is only used for testing of tag evaluation
+// and in #cgo lines, which accept either syntax.
+func matchAuto(ctxt *build.Context, text string, allTags map[string]bool) bool {
+	if strings.ContainsAny(text, "&|()") {
+		text = "//go:build " + text
+	} else {
+		text = "// +build " + text
+	}
+	x, err := constraint.Parse(text)
+	if err != nil {
+		return false
+	}
+	return eval(ctxt, x, allTags)
+}
+
+func eval(ctxt *build.Context, x constraint.Expr, allTags map[string]bool) bool {
+	return x.Eval(func(tag string) bool { return matchTag(ctxt, tag, allTags) })
+}
+
+// matchTag reports whether the name is one of:
+//
+//	cgo (if cgo is enabled)
+//	$GOOS
+//	$GOARCH
+//	ctxt.Compiler
+//	linux (if GOOS = android)
+//	solaris (if GOOS = illumos)
+//	tag (if tag is listed in ctxt.BuildTags or ctxt.ReleaseTags)
+//
+// It records all consulted tags in allTags.
+func matchTag(ctxt *build.Context, name string, allTags map[string]bool) bool {
+	if allTags != nil {
+		allTags[name] = true
+	}
+
+	// special tags
+	if ctxt.CgoEnabled && name == "cgo" {
+		return true
+	}
+	if name == ctxt.GOOS || name == ctxt.GOARCH || name == ctxt.Compiler {
+		return true
+	}
+	if ctxt.GOOS == "android" && name == "linux" {
+		return true
+	}
+	if ctxt.GOOS == "illumos" && name == "solaris" {
+		return true
+	}
+	if ctxt.GOOS == "ios" && name == "darwin" {
+		return true
+	}
+
+	// other tags
+	for _, tag := range ctxt.BuildTags {
+		if tag == name {
+			return true
+		}
+	}
+	for _, tag := range ctxt.ToolTags {
+		if tag == name {
+			return true
+		}
+	}
+	for _, tag := range ctxt.ReleaseTags {
+		if tag == name {
+			return true
+		}
+	}
+
+	return false
 }

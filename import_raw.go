@@ -23,6 +23,8 @@ type TaggedFile struct {
 	QuotedImportCommentLine int
 	Imports                 []TFImport
 	Embeds                  map[string][]token.Position
+
+	Error error
 }
 
 type TFImport struct {
@@ -58,33 +60,35 @@ type RawPackage struct {
 	//TODO(matloob): turn not go file types into strings?
 
 	// Source files
-	GoFiles []TaggedFile // .go source files (including CgoFiles, TestGoFiles, XTestGoFiles)
-	// CgoFiles []TaggedFile // .go source files that import "C"
-	// IgnoredGoFiles    []TaggedFile // .go source files ignored for this build (including ignored _test.go files)
-	DocumentationGoFiles []string // .go source file that specifies "package documentation" and is always ignored
-	InvalidGoFiles       []string // .go source files with detected problems (parse error, wrong package name, and so on)
-	// IgnoredOtherFiles []TaggedFile // non-.go source files ignored for this build
-	CFiles       []TaggedFile // .c source files
-	CXXFiles     []TaggedFile // .cc, .cpp and .cxx source files
-	MFiles       []TaggedFile // .m (Objective-C) source files
-	HFiles       []TaggedFile // .h, .hh, .hpp and .hxx source files
-	FFiles       []TaggedFile // .f, .F, .for and .f90 Fortran source files
-	SFiles       []TaggedFile // .s source files
-	SwigFiles    []TaggedFile // .swig files
-	SwigCXXFiles []TaggedFile // .swigcxx files
-	SysoFiles    []TaggedFile // .syso system object files to add to archive
-
+	SourceFiles []*TaggedFile
+	/*
+		GoFiles []TaggedFile // .go source files (including CgoFiles, TestGoFiles, XTestGoFiles)
+		// CgoFiles []TaggedFile // .go source files that import "C"
+		// IgnoredGoFiles    []TaggedFile // .go source files ignored for this build (including ignored _test.go files)
+		DocumentationGoFiles []string // .go source file that specifies "package documentation" and is always ignored
+		InvalidGoFiles       []string // .go source files with detected problems (parse error, wrong package name, and so on)
+		// IgnoredOtherFiles []TaggedFile // non-.go source files ignored for this build
+		CFiles       []TaggedFile // .c source files
+		CXXFiles     []TaggedFile // .cc, .cpp and .cxx source files
+		MFiles       []TaggedFile // .m (Objective-C) source files
+		HFiles       []TaggedFile // .h, .hh, .hpp and .hxx source files
+		FFiles       []TaggedFile // .f, .F, .for and .f90 Fortran source files
+		SFiles       []TaggedFile // .s source files
+		SwigFiles    []TaggedFile // .swig files
+		SwigCXXFiles []TaggedFile // .swigcxx files
+		SysoFiles    []TaggedFile // .syso system object files to add to archive
+	*/
 	// Cgo directives
-	CgoCFLAGS    []string // Cgo CFLAGS directives
-	CgoCPPFLAGS  []string // Cgo CPPFLAGS directives
-	CgoCXXFLAGS  []string // Cgo CXXFLAGS directives
-	CgoFFLAGS    []string // Cgo FFLAGS directives
-	CgoLDFLAGS   []string // Cgo LDFLAGS directives
-	CgoPkgConfig []string // Cgo pkg-config directives
+	/*	CgoCFLAGS    []string // Cgo CFLAGS directives
+		CgoCPPFLAGS  []string // Cgo CPPFLAGS directives
+		CgoCXXFLAGS  []string // Cgo CXXFLAGS directives
+		CgoFFLAGS    []string // Cgo FFLAGS directives
+		CgoLDFLAGS   []string // Cgo LDFLAGS directives
+		CgoPkgConfig []string // Cgo pkg-config directives*/
 
 	// Test information
-	TestGoFiles  []TaggedFile // _test.go files in package
-	XTestGoFiles []TaggedFile // _test.go files outside package
+	//TestGoFiles  []TaggedFile // _test.go files in package
+	//XTestGoFiles []TaggedFile // _test.go files outside package
 
 	// Dependency information
 	/*
@@ -167,18 +171,18 @@ func ImportRaw(path string, srcDir string) (*RawPackage, error) {
 	}
 
 	var badGoError error
-	badFiles := make(map[string]bool)
-	badFile := func(tf TaggedFile, err error) {
-		if badGoError == nil {
-			badGoError = err
+	//badFiles := make(map[string]bool)
+	// TODO(matloob): remove badfiles?
+	badFile := func(tf *TaggedFile, err error) {
+		if tf.Error == nil {
+			tf.Error = err
 		}
-		if !badFiles[tf.Name] {
-			p.InvalidGoFiles = append(p.InvalidGoFiles, tf.Name)
-			badFiles[tf.Name] = true
-		}
+		/*if !badFiles[tf.Name] {
+		p.InvalidGoFiles = append(p.InvalidGoFiles, tf.Name)
+		badFiles[tf.Name] = true
+		}*/
 	}
 
-	var Sfiles []TaggedFile // files with ".S"(capital S)/.sx(capital s equivalent for case insensitive filesystems)
 	var firstFile /*, firstCommentFile*/ string
 
 	/*
@@ -206,27 +210,14 @@ func ImportRaw(path string, srcDir string) (*RawPackage, error) {
 
 		info, err := getInfo(p.Dir, name, &p.BinaryOnly, fset)
 		if err != nil {
-			badFile(TaggedFile{Name: name}, err)
+			badFile(&TaggedFile{Name: name}, err)
 			continue
 		}
 
-		/*
-			if info == nil {
-
-				if strings.HasPrefix(tf, "_") || strings.HasPrefix(tf, ".") {
-					// not due to build constraints - don't report
-				} else if ext == ".go" {
-					p.IgnoredGoFiles = append(p.IgnoredGoFiles, tf)
-				} else if fileListForExt(p, ext) != nil {
-					p.IgnoredOtherFiles = append(p.IgnoredOtherFiles, tf)
-				}
-				continue
-			}
-		*/
 		if info == nil {
-			p.GoFiles = append(p.GoFiles, TaggedFile{Name: name, IgnoreFile: true})
+			p.SourceFiles = append(p.SourceFiles, &TaggedFile{Name: name, IgnoreFile: true})
 		}
-		tf := TaggedFile{
+		tf := &TaggedFile{
 			Name:                 name,
 			PkgName:              info.parsed.Name.Name,
 			GoBuildConstraint:    info.goBuildConstraint,
@@ -235,17 +226,8 @@ func ImportRaw(path string, srcDir string) (*RawPackage, error) {
 		data := info.header
 
 		// Going to save the file. For non-Go files, can stop here.
-		switch ext {
-		case ".go":
-			// keep going
-		case ".S", ".sx":
-			// special case for cgo, handled at end
-			Sfiles = append(Sfiles, tf)
-			continue
-		default:
-			if list := fileListForExtRaw(p, ext); list != nil {
-				*list = append(*list, tf)
-			}
+		p.SourceFiles = append(p.SourceFiles, tf)
+		if ext != ".go" {
 			continue
 		}
 
@@ -258,10 +240,6 @@ func ImportRaw(path string, srcDir string) (*RawPackage, error) {
 		var pkg string
 		if info.parsed != nil {
 			pkg = info.parsed.Name.Name
-			if pkg == "documentation" {
-				p.DocumentationGoFiles = append(p.DocumentationGoFiles, name)
-				continue
-			}
 		}
 
 		isTest := strings.HasSuffix(name, "_test.go")
@@ -376,8 +354,6 @@ func ImportRaw(path string, srcDir string) (*RawPackage, error) {
 				embedMap[emb.pattern] = append(embedMap[emb.pattern], emb.pos)
 			}
 		}*/
-		p.GoFiles = append(p.GoFiles, tf)
-		// *fileList = append(*fileList, tf)
 	}
 
 	/*
@@ -394,9 +370,6 @@ func ImportRaw(path string, srcDir string) (*RawPackage, error) {
 		p.TestImports, p.TestImportPos = cleanDecls(testImportPos)
 		p.XTestImports, p.XTestImportPos = cleanDecls(xTestImportPos)
 	*/
-	// TODO Remove these if we're not using cgo.
-	p.SFiles = append(p.SFiles, Sfiles...)
-
 	// add the .S/.sx files only if we are using cgo
 	// (which means gcc will compile them).
 	// The standard assemblers expect .s files.
@@ -546,28 +519,4 @@ func TODOToExpand() {
 		}
 
 	*/
-}
-
-func fileListForExtRaw(p *RawPackage, ext string) *[]TaggedFile {
-	switch ext {
-	case ".c":
-		return &p.CFiles
-	case ".cc", ".cpp", ".cxx":
-		return &p.CXXFiles
-	case ".m":
-		return &p.MFiles
-	case ".h", ".hh", ".hpp", ".hxx":
-		return &p.HFiles
-	case ".f", ".F", ".for", ".f90":
-		return &p.FFiles
-	case ".s", ".S", ".sx":
-		return &p.SFiles
-	case ".swig":
-		return &p.SwigFiles
-	case ".swigcxx":
-		return &p.SwigCXXFiles
-	case ".syso":
-		return &p.SysoFiles
-	}
-	return nil
 }
