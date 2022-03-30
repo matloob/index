@@ -15,6 +15,7 @@ import (
 
 type TaggedFile struct {
 	Name                    string
+	Doc                     string // doc.Synopsis of package comment
 	PkgName                 string
 	IgnoreFile              bool // starts with _ or . or should otherwise always be ignored
 	GoBuildConstraint       string
@@ -24,7 +25,8 @@ type TaggedFile struct {
 	Imports                 []TFImport
 	Embeds                  map[string][]token.Position
 
-	Error error
+	Error      error
+	ParseError error //
 }
 
 type TFImport struct {
@@ -38,21 +40,16 @@ type RawPackage struct {
 	// TODO(matloob): Do we need AllTags in RawPackage?
 	// We can produce it from contstraints when we evaluate them.
 
+	Error error
+
+	// Arguments to build.Import. Is path always "."?
+	Path   string
 	SrcDir string
 
 	Dir           string // directory containing package sources
 	Name          string // package name
 	ImportComment string // path in import comment on package statement
-	Doc           string // documentation synopsis
 	ImportPath    string // import path of package ("" if unknown)
-	//Root          string // root of Go tree where this package lives
-	//SrcRoot       string // package source root directory ("" if unknown)
-	//PkgRoot       string // package install root directory ("" if unknown)
-	//PkgTargetRoot string // architecture dependent install root directory ("" if unknown)
-	//BinDir string // command install directory ("" if unknown)
-	//Goroot bool // package found in Go root
-	// PkgObj        string   // installed .a file
-	// AllTags []string // tags that can influence file selection in this directory
 
 	ConflictDir string // this directory shadows Dir in $GOPATH
 	BinaryOnly  bool   // cannot be rebuilt from source (has //go:binary-only-package comment)
@@ -61,56 +58,10 @@ type RawPackage struct {
 
 	// Source files
 	SourceFiles []*TaggedFile
-	/*
-		GoFiles []TaggedFile // .go source files (including CgoFiles, TestGoFiles, XTestGoFiles)
-		// CgoFiles []TaggedFile // .go source files that import "C"
-		// IgnoredGoFiles    []TaggedFile // .go source files ignored for this build (including ignored _test.go files)
-		DocumentationGoFiles []string // .go source file that specifies "package documentation" and is always ignored
-		InvalidGoFiles       []string // .go source files with detected problems (parse error, wrong package name, and so on)
-		// IgnoredOtherFiles []TaggedFile // non-.go source files ignored for this build
-		CFiles       []TaggedFile // .c source files
-		CXXFiles     []TaggedFile // .cc, .cpp and .cxx source files
-		MFiles       []TaggedFile // .m (Objective-C) source files
-		HFiles       []TaggedFile // .h, .hh, .hpp and .hxx source files
-		FFiles       []TaggedFile // .f, .F, .for and .f90 Fortran source files
-		SFiles       []TaggedFile // .s source files
-		SwigFiles    []TaggedFile // .swig files
-		SwigCXXFiles []TaggedFile // .swigcxx files
-		SysoFiles    []TaggedFile // .syso system object files to add to archive
-	*/
-	// Cgo directives
-	/*	CgoCFLAGS    []string // Cgo CFLAGS directives
-		CgoCPPFLAGS  []string // Cgo CPPFLAGS directives
-		CgoCXXFLAGS  []string // Cgo CXXFLAGS directives
-		CgoFFLAGS    []string // Cgo FFLAGS directives
-		CgoLDFLAGS   []string // Cgo LDFLAGS directives
-		CgoPkgConfig []string // Cgo pkg-config directives*/
+}
 
-	// Test information
-	//TestGoFiles  []TaggedFile // _test.go files in package
-	//XTestGoFiles []TaggedFile // _test.go files outside package
-
-	// Dependency information
-	/*
-		Imports        []string                    // import paths from GoFiles, CgoFiles
-		ImportPos      map[string][]token.Position // line information for Imports
-		TestImports    []string                    // import paths from TestGoFiles
-		TestImportPos  map[string][]token.Position // line information for TestImports
-		XTestImports   []string                    // import paths from XTestGoFiles
-		XTestImportPos map[string][]token.Position // line information for XTestImports
-
-		// //go:embed patterns found in Go source files
-		// For example, if a source file says
-		//	//go:embed a* b.c
-		// then the list will contain those two strings as separate entries.
-		// (See package embed for more details about //go:embed.)
-		EmbedPatterns        []string                    // patterns from GoFiles, CgoFiles
-		EmbedPatternPos      map[string][]token.Position // line information for EmbedPatterns
-		TestEmbedPatterns    []string                    // patterns from TestGoFiles
-		TestEmbedPatternPos  map[string][]token.Position // line information for TestEmbedPatterns
-		XTestEmbedPatterns   []string                    // patterns from XTestGoFiles
-		XTestEmbedPatternPos map[string][]token.Position // line information for XTestEmbedPatternPos
-	*/
+func ImportDirRaw(dir string) *RawPackage {
+	return ImportRaw(".", dir)
 }
 
 // Import returns details about the Go package named by the import path,
@@ -129,18 +80,22 @@ type RawPackage struct {
 // If an error occurs, Import returns a non-nil error and a non-nil
 // *Package containing partial information.
 //
-func ImportRaw(path string, srcDir string) (*RawPackage, error) {
+func ImportRaw(path string, srcDir string) *RawPackage {
 	p := &RawPackage{
+		Path:   path,
 		SrcDir: srcDir,
 	}
 	if path == "" {
-		return p, fmt.Errorf("import %q: invalid import path", path)
+		p.Error = fmt.Errorf("import %q: invalid import path", path)
+		return p
 	}
 
 	if !IsLocalImport(path) {
 		panic(path)
+	} else {
 		if srcDir == "" {
-			return p, fmt.Errorf("import %q: import relative to unknown directory", path)
+			p.Error = fmt.Errorf("import %q: import relative to unknown directory", path)
+			return p
 		}
 		if !filepath.IsAbs(path) {
 			p.Dir = filepath.Join(srcDir, path)
@@ -153,46 +108,18 @@ func ImportRaw(path string, srcDir string) (*RawPackage, error) {
 	// non-nil *Package returned when an error occurs.
 	// We need to do this before we return early on FindOnly flag.
 	if IsLocalImport(path) && !isDir(p.Dir) {
-		// TODO(matloob): figure this out... Since we're not looking for goroot packages,
-		// always return error below.
-		/*if ctxt.Compiler == "gccgo" && p.Goroot {
-			// gccgo has no sources for GOROOT packages.
-			return p, nil
-		}*/
-
 		// package was not found
-		return p, fmt.Errorf("cannot find package %q in:\n\t%s", p.ImportPath, p.Dir)
+		p.Error = fmt.Errorf("cannot find package %q in:\n\t%s", path, p.Dir)
+		return p
 	}
 
 	// TODO: use os.ReadDir
 	dirs, err := ioutil.ReadDir(p.Dir)
 	if err != nil {
-		return p, err
+		p.Error = err
+		return p
 	}
 
-	var badGoError error
-	//badFiles := make(map[string]bool)
-	// TODO(matloob): remove badfiles?
-	badFile := func(tf *TaggedFile, err error) {
-		if tf.Error == nil {
-			tf.Error = err
-		}
-		/*if !badFiles[tf.Name] {
-		p.InvalidGoFiles = append(p.InvalidGoFiles, tf.Name)
-		badFiles[tf.Name] = true
-		}*/
-	}
-
-	var firstFile /*, firstCommentFile*/ string
-
-	/*
-		embedPos := make(map[string][]token.Position)
-		testEmbedPos := make(map[string][]token.Position)
-		xTestEmbedPos := make(map[string][]token.Position)
-		importPos := make(map[string][]token.Position)
-		testImportPos := make(map[string][]token.Position)
-		xTestImportPos := make(map[string][]token.Position)
-		allTags := make(map[string]bool)*/
 	fset := token.NewFileSet()
 	for _, d := range dirs {
 		if d.IsDir() {
@@ -210,18 +137,19 @@ func ImportRaw(path string, srcDir string) (*RawPackage, error) {
 
 		info, err := getInfo(p.Dir, name, &p.BinaryOnly, fset)
 		if err != nil {
-			badFile(&TaggedFile{Name: name}, err)
+			p.SourceFiles = append(p.SourceFiles, &TaggedFile{Name: name, Error: err})
 			continue
-		}
-
-		if info == nil {
+		} else if info == nil {
 			p.SourceFiles = append(p.SourceFiles, &TaggedFile{Name: name, IgnoreFile: true})
+			continue
 		}
 		tf := &TaggedFile{
 			Name:                 name,
-			PkgName:              info.parsed.Name.Name,
 			GoBuildConstraint:    info.goBuildConstraint,
 			PlusBuildConstraints: info.plusBuildConstraints,
+		}
+		if info.parsed != nil {
+			tf.PkgName = info.parsed.Name.Name
 		}
 		data := info.header
 
@@ -232,39 +160,13 @@ func ImportRaw(path string, srcDir string) (*RawPackage, error) {
 		}
 
 		if info.parseErr != nil {
-			badFile(tf, info.parseErr)
+			tf.ParseError = info.parseErr
 			// Fall through: we might still have a partial AST in info.parsed,
 			// and we want to list files with parse errors anyway.
 		}
 
-		var pkg string
-		if info.parsed != nil {
-			pkg = info.parsed.Name.Name
-		}
-
-		isTest := strings.HasSuffix(name, "_test.go")
-		isXTest := false
-		if isTest && strings.HasSuffix(pkg, "_test") && p.Name != pkg {
-			isXTest = true
-			pkg = pkg[:len(pkg)-len("_test")]
-		}
-
-		if p.Name == "" {
-			p.Name = pkg
-			firstFile = name
-		} else if pkg != p.Name {
-			// TODO(#45999): The choice of p.Name is arbitrary based on file iteration
-			// order. Instead of resolving p.Name arbitrarily, we should clear out the
-			// existing tf and mark the existing files as also invalid.
-			badFile(tf, &MultiplePackageError{
-				Dir:      p.Dir,
-				Packages: []string{p.Name, pkg},
-				Files:    []string{firstFile, name},
-			})
-		}
-		// Grab the first package comment as docs, provided it is not from a test file.
-		if info.parsed != nil && info.parsed.Doc != nil && p.Doc == "" && !isTest && !isXTest {
-			p.Doc = doc.Synopsis(info.parsed.Doc.Text())
+		if info.parsed != nil && info.parsed.Doc != nil {
+			tf.Doc = doc.Synopsis(info.parsed.Doc.Text())
 		}
 
 		qcom, line := findImportComment(data)
@@ -272,69 +174,7 @@ func ImportRaw(path string, srcDir string) (*RawPackage, error) {
 			tf.QuotedImportComment = qcom
 			tf.QuotedImportCommentLine = line
 		}
-		// Add import comment?
-		/*
-				if mode&ImportComment != 0 {
-					qcom, line := findImportComment(data)
-					if line != 0 {
-						com, err := strconv.Unquote(qcom)
-						if err != nil {
-							badFile(tf, fmt.Errorf("%s:%d: cannot parse import comment", filename, line))
-						} else if p.ImportComment == "" {
-							p.ImportComment = com
-							firstCommentFile = tf
-						} else if p.ImportComment != com {
-							badFile(tf, fmt.Errorf("found import comments %q (%s) and %q (%s) in %s", p.ImportComment, firstCommentFile, com, tf, p.Dir))
-						}
-					}
-				}
 
-			// Record imports and information about cgo.
-			isCgo := false
-			for _, imp := range info.imports {
-				if imp.path == "C" {
-					if isTest {
-						badFile(tf, fmt.Errorf("use of cgo in test %s not supported", name))
-						continue
-					}
-					isCgo = true
-
-						if imp.doc != nil {
-							if err := ctxt.saveCgo(filename, p, imp.doc); err != nil {
-								badFile(tf, err)
-							}
-						}
-
-
-				}
-			}
-
-				var fileList *[]string
-				//var importMap, embedMap map[string][]token.Position
-				switch {
-				case isCgo:
-					//allTags["cgo"] = true
-					if ctxt.CgoEnabled {
-						fileList = &p.CgoFiles
-						importMap = importPos
-						embedMap = embedPos
-					} else {
-						// Ignore imports and embeds from cgo files if cgo is disabled.
-						fileList = &p.IgnoredGoFiles
-					}
-				case isXTest:
-					fileList = &p.XTestGoFiles
-					importMap = xTestImportPos
-					embedMap = xTestEmbedPos
-				case isTest:
-					fileList = &p.TestGoFiles
-					importMap = testImportPos
-					embedMap = testEmbedPos
-				default:
-					fileList = &p.GoFiles
-					importMap = importPos
-					embedMap = embedPos
-				}*/
 		for _, imp := range info.imports {
 			// TODO(matloob): only save doc for cgo?
 			// TODO(matloob): remove filename from position and add it back later to save space?
@@ -344,53 +184,9 @@ func ImportRaw(path string, srcDir string) (*RawPackage, error) {
 		for _, emb := range info.embeds {
 			tf.Embeds[emb.pattern] = append(tf.Embeds[emb.pattern], emb.pos)
 		}
-		/*if importMap != nil {
-			for _, imp := range info.imports {
-				importMap[imp.path] = append(importMap[imp.path], fset.Position(imp.pos))
-			}
-		}
-		if embedMap != nil {
-			for _, emb := range info.embeds {
-				embedMap[emb.pattern] = append(embedMap[emb.pattern], emb.pos)
-			}
-		}*/
+
 	}
-
-	/*
-		for tag := range allTags {
-			p.AllTags = append(p.AllTags, tag)
-		}
-		sort.Strings(p.AllTags)
-
-		p.EmbedPatterns, p.EmbedPatternPos = cleanDecls(embedPos)
-		p.TestEmbedPatterns, p.TestEmbedPatternPos = cleanDecls(testEmbedPos)
-		p.XTestEmbedPatterns, p.XTestEmbedPatternPos = cleanDecls(xTestEmbedPos)
-
-		p.Imports, p.ImportPos = cleanDecls(importPos)
-		p.TestImports, p.TestImportPos = cleanDecls(testImportPos)
-		p.XTestImports, p.XTestImportPos = cleanDecls(xTestImportPos)
-	*/
-	// add the .S/.sx files only if we are using cgo
-	// (which means gcc will compile them).
-	// The standard assemblers expect .s files.
-	/*
-		if len(p.CgoFiles) > 0 {
-			p.SFiles = append(p.SFiles, Sfiles...)
-			sort.Strings(p.SFiles)
-		} else {
-			p.IgnoredOtherFiles = append(p.IgnoredOtherFiles, Sfiles...)
-			sort.Strings(p.IgnoredOtherFiles)
-		}
-	*/
-
-	if badGoError != nil {
-		return p, badGoError
-	}
-	/*
-		if len(p.GoFiles)+len(p.CgoFiles)+len(p.TestGoFiles)+len(p.XTestGoFiles) == 0 {
-			return p, &NoGoError{p.Dir}
-		}*/
-	return p, nil
+	return p
 }
 
 func isDir(path string) bool {

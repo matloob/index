@@ -20,8 +20,14 @@ import (
 
 // Assumption: directory is in module cache.
 
-func Cook(ctxt *build.Context, rp *RawPackage, mode ImportMode) (*build.Package, error) {
-	p := &build.Package{}
+func Cook(ctxt build.Context, rp *RawPackage, mode ImportMode) (*build.Package, error) {
+	p := &build.Package{
+		ImportPath: rp.Path,
+		Dir:        rp.SrcDir,
+	}
+	if rp.Error != nil {
+		return p, rp.Error
+	}
 
 	const path = "." // TODO(matloob): clean this up; ImportDir calls ctxt.Import with path == "."
 	srcDir := rp.SrcDir
@@ -102,7 +108,7 @@ func Cook(ctxt *build.Context, rp *RawPackage, mode ImportMode) (*build.Package,
 	}
 
 	var Sfiles []string // files with ".S"(capital S)/.sx(capital s equivalent for case insensitive filesystems)
-	var firstCommentFile string
+	var firstFile, firstCommentFile string
 	embedPos := make(map[string][]token.Position)
 	testEmbedPos := make(map[string][]token.Position)
 	xTestEmbedPos := make(map[string][]token.Position)
@@ -111,19 +117,19 @@ func Cook(ctxt *build.Context, rp *RawPackage, mode ImportMode) (*build.Package,
 	xTestImportPos := make(map[string][]token.Position)
 	allTags := make(map[string]bool)
 	for _, tf := range rp.SourceFiles {
-		if tf.IgnoreFile {
-			if strings.HasPrefix(tf.Name, "_") || strings.HasPrefix(tf.Name, ".") {
-				// not due to build constraints - don't report
-			} else {
-				p.IgnoredGoFiles = append(p.IgnoredGoFiles, tf.Name)
-			}
-			continue
-		} else if tf.Error != nil {
+		if tf.Error != nil {
 			badFile(tf.Name, tf.Error)
+			continue
+		} else if tf.ParseError != nil {
+			badFile(tf.Name, tf.ParseError)
+			// Fall through: we might still have a partial AST in info.parsed,
+			// and we want to list files with parse errors anyway.
 		}
 
 		var shouldBuild = true
-		if tf.GoBuildConstraint != "" {
+		if !goodOSArchFile(ctxt, tf.Name, allTags) && !ctxt.UseAllFiles {
+			shouldBuild = false
+		} else if tf.GoBuildConstraint != "" {
 			x, err := constraint.Parse(tf.GoBuildConstraint)
 			if err != nil {
 				return nil, fmt.Errorf("%s: parsing //go:build line: %v", tf.Name, err)
@@ -138,8 +144,9 @@ func Cook(ctxt *build.Context, rp *RawPackage, mode ImportMode) (*build.Package,
 				}
 			}
 		}
+
 		ext := nameExt(tf.Name)
-		if !shouldBuild {
+		if !shouldBuild || tf.IgnoreFile {
 			if strings.HasPrefix(tf.Name, "_") || strings.HasPrefix(tf.Name, ".") {
 				// not due to build constraints - don't report
 			} else if ext == ".go" {
@@ -165,6 +172,39 @@ func Cook(ctxt *build.Context, rp *RawPackage, mode ImportMode) (*build.Package,
 			continue
 		}
 
+		// TODO(matloob): determine pkg name here? pkg variable
+
+		pkg := tf.PkgName
+		if pkg == "documentation" {
+			p.IgnoredGoFiles = append(p.IgnoredGoFiles, tf.Name)
+			continue
+		}
+		isTest := strings.HasSuffix(tf.Name, "_test.go")
+		isXTest := false
+		if isTest && strings.HasSuffix(tf.PkgName, "_test") && p.Name != tf.PkgName {
+			isXTest = true
+			pkg = pkg[:len(pkg)-len("_test")]
+		}
+
+		// Grab the first package comment as docs, provided it is not from a test file.
+		if tf.Doc != "" && p.Doc == "" && !isTest && !isXTest {
+			p.Doc = tf.Doc
+		}
+
+		if p.Name == "" {
+			p.Name = pkg
+			firstFile = tf.Name
+		} else if pkg != p.Name {
+			// TODO(#45999): The choice of p.Name is arbitrary based on file iteration
+			// order. Instead of resolving p.Name arbitrarily, we should clear out the
+			// existing name and mark the existing files as also invalid.
+			badFile(tf.Name, &MultiplePackageError{
+				Dir:      p.Dir,
+				Packages: []string{p.Name, pkg},
+				Files:    []string{firstFile, tf.Name},
+			})
+		}
+
 		if mode&ImportComment != 0 {
 			com, err := strconv.Unquote(tf.QuotedImportComment)
 			if err != nil {
@@ -175,14 +215,6 @@ func Cook(ctxt *build.Context, rp *RawPackage, mode ImportMode) (*build.Package,
 			} else if p.ImportComment != com {
 				badFile(tf.Name, fmt.Errorf("found import comments %q (%s) and %q (%s) in %s", p.ImportComment, firstCommentFile, com, tf, p.Dir))
 			}
-		}
-
-		// TODO(matloob): determine pkg name here? pkg variable
-
-		isTest := strings.HasSuffix(tf.Name, "_test.go")
-		isXTest := false
-		if isTest && strings.HasSuffix(tf.PkgName, "_test") && p.Name != tf.PkgName {
-			isXTest = true
 		}
 
 		// Record imports and information about cgo.
@@ -342,7 +374,7 @@ func isFile(path string) bool {
 	return true
 }
 
-func saveCgo(ctxt *build.Context, filename string, di *build.Package, importComment string) error {
+func saveCgo(ctxt build.Context, filename string, di *build.Package, importComment string) error {
 	text := importComment
 	for _, line := range strings.Split(text, "\n") {
 		orig := line
@@ -443,7 +475,7 @@ func makePathsAbsolute(args []string, srcDir string) {
 //
 // matchAuto is only used for testing of tag evaluation
 // and in #cgo lines, which accept either syntax.
-func matchAuto(ctxt *build.Context, text string, allTags map[string]bool) bool {
+func matchAuto(ctxt build.Context, text string, allTags map[string]bool) bool {
 	if strings.ContainsAny(text, "&|()") {
 		text = "//go:build " + text
 	} else {
@@ -456,7 +488,7 @@ func matchAuto(ctxt *build.Context, text string, allTags map[string]bool) bool {
 	return eval(ctxt, x, allTags)
 }
 
-func eval(ctxt *build.Context, x constraint.Expr, allTags map[string]bool) bool {
+func eval(ctxt build.Context, x constraint.Expr, allTags map[string]bool) bool {
 	return x.Eval(func(tag string) bool { return matchTag(ctxt, tag, allTags) })
 }
 
@@ -471,7 +503,7 @@ func eval(ctxt *build.Context, x constraint.Expr, allTags map[string]bool) bool 
 //	tag (if tag is listed in ctxt.BuildTags or ctxt.ReleaseTags)
 //
 // It records all consulted tags in allTags.
-func matchTag(ctxt *build.Context, name string, allTags map[string]bool) bool {
+func matchTag(ctxt build.Context, name string, allTags map[string]bool) bool {
 	if allTags != nil {
 		allTags[name] = true
 	}
@@ -511,4 +543,34 @@ func matchTag(ctxt *build.Context, name string, allTags map[string]bool) bool {
 	}
 
 	return false
+}
+
+func goodOSArchFile(ctxt build.Context, name string, allTags map[string]bool) bool {
+	name, _, _ = strings.Cut(name, ".")
+
+	// Before Go 1.4, a file called "linux.go" would be equivalent to having a
+	// build tag "linux" in that file. For Go 1.4 and beyond, we require this
+	// auto-tagging to apply only to files with a non-empty prefix, so
+	// "foo_linux.go" is tagged but "linux.go" is not. This allows new operating
+	// systems, such as android, to arrive without breaking existing code with
+	// innocuous source code in "android.go". The easiest fix: cut everything
+	// in the name before the initial _.
+	i := strings.Index(name, "_")
+	if i < 0 {
+		return true
+	}
+	name = name[i:] // ignore everything before first _
+
+	l := strings.Split(name, "_")
+	if n := len(l); n > 0 && l[n-1] == "test" {
+		l = l[:n-1]
+	}
+	n := len(l)
+	if n >= 2 && knownOS[l[n-2]] && knownArch[l[n-1]] {
+		return matchTag(ctxt, l[n-1], allTags) && matchTag(ctxt, l[n-2], allTags)
+	}
+	if n >= 1 && (knownOS[l[n-1]] || knownArch[l[n-1]]) {
+		return matchTag(ctxt, l[n-1], allTags)
+	}
+	return true
 }

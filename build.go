@@ -26,10 +26,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"index/internal/buildcfg"
-	exec "index/internal/execabs"
-	"index/internal/goroot"
-	"index/internal/goversion"
+	exec "github.com/matloob/index/internal/execabs"
+	"github.com/matloob/index/internal/goroot"
 )
 
 // A Context specifies the supporting context for a build.
@@ -273,11 +271,6 @@ func (ctxt *Context) SrcDirs() []string {
 	return all
 }
 
-// Default is the default Context for builds.
-// It uses the GOARCH, GOOS, GOROOT, and GOPATH environment variables
-// if set, or else the compiled code's GOARCH, GOOS, and GOROOT.
-var Default Context = defaultContext()
-
 func defaultGOPATH() string {
 	env := "HOME"
 	if runtime.GOOS == "windows" {
@@ -298,59 +291,6 @@ func defaultGOPATH() string {
 }
 
 var defaultToolTags, defaultReleaseTags []string
-
-func defaultContext() Context {
-	var c Context
-
-	c.GOARCH = buildcfg.GOARCH
-	c.GOOS = buildcfg.GOOS
-	c.GOROOT = pathpkg.Clean(runtime.GOROOT())
-	c.GOPATH = envOr("GOPATH", defaultGOPATH())
-	c.Compiler = runtime.Compiler
-
-	// For each experiment that has been enabled in the toolchain, define a
-	// build tag with the same name but prefixed by "goexperiment." which can be
-	// used for compiling alternative files for the experiment. This allows
-	// changes for the experiment, like extra struct fields in the runtime,
-	// without affecting the base non-experiment code at all.
-	for _, exp := range buildcfg.EnabledExperiments() {
-		c.ToolTags = append(c.ToolTags, "goexperiment."+exp)
-	}
-	defaultToolTags = append([]string{}, c.ToolTags...) // our own private copy
-
-	// Each major Go release in the Go 1.x series adds a new
-	// "go1.x" release tag. That is, the go1.x tag is present in
-	// all releases >= Go 1.x. Code that requires Go 1.x or later
-	// should say "+build go1.x", and code that should only be
-	// built before Go 1.x (perhaps it is the stub to use in that
-	// case) should say "+build !go1.x".
-	// The last element in ReleaseTags is the current release.
-	for i := 1; i <= goversion.Version; i++ {
-		c.ReleaseTags = append(c.ReleaseTags, "go1."+strconv.Itoa(i))
-	}
-
-	defaultReleaseTags = append([]string{}, c.ReleaseTags...) // our own private copy
-
-	env := os.Getenv("CGO_ENABLED")
-	if env == "" {
-		env = defaultCGO_ENABLED
-	}
-	switch env {
-	case "1":
-		c.CgoEnabled = true
-	case "0":
-		c.CgoEnabled = false
-	default:
-		// cgo must be explicitly enabled for cross compilation builds
-		if runtime.GOARCH == c.GOARCH && runtime.GOOS == c.GOOS {
-			c.CgoEnabled = cgoEnabled[c.GOOS+"/"+c.GOARCH]
-			break
-		}
-		c.CgoEnabled = false
-	}
-
-	return c
-}
 
 func envOr(name, def string) string {
 	s := os.Getenv(name)
@@ -1495,16 +1435,6 @@ func cleanDecls(m map[string][]token.Position) ([]string, map[string][]token.Pos
 	}
 	sort.Strings(all)
 	return all, m
-}
-
-// Import is shorthand for Default.Import.
-func Import(path, srcDir string, mode ImportMode) (*Package, error) {
-	return Default.Import(path, srcDir, mode)
-}
-
-// ImportDir is shorthand for Default.ImportDir.
-func ImportDir(dir string, mode ImportMode) (*Package, error) {
-	return Default.ImportDir(dir, mode)
 }
 
 var (
