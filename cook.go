@@ -21,7 +21,7 @@ import (
 
 // Assumption: directory is in module cache.
 
-func Cook(ctxt build.Context, rp *RawPackage, mode ImportMode) (*build.Package, error) {
+func Cook(ctxt build.Context, rp *RawPackage, mode build.ImportMode) (*build.Package, error) {
 	p := &build.Package{
 		ImportPath: rp.Path,
 		Dir:        rp.SrcDir,
@@ -87,11 +87,11 @@ func Cook(ctxt build.Context, rp *RawPackage, mode ImportMode) (*build.Package, 
 		}
 	}
 
-	if mode&FindOnly != 0 {
+	if mode&build.FindOnly != 0 {
 		return p, pkgerr
 	}
 	// TODO(matloob): remove this? impossible for binaryOnly to be set here...
-	if binaryOnly && (mode&AllowBinary) != 0 {
+	if binaryOnly && (mode&build.AllowBinary) != 0 {
 		return p, pkgerr
 	}
 
@@ -152,7 +152,7 @@ func Cook(ctxt build.Context, rp *RawPackage, mode ImportMode) (*build.Package, 
 				// not due to build constraints - don't report
 			} else if ext == ".go" {
 				p.IgnoredGoFiles = append(p.IgnoredGoFiles, tf.Name)
-			} else if fileListForExtBP(p, ext) != nil {
+			} else if fileListForExt(p, ext) != nil {
 				p.IgnoredOtherFiles = append(p.IgnoredOtherFiles, tf.Name)
 			}
 			continue
@@ -167,7 +167,7 @@ func Cook(ctxt build.Context, rp *RawPackage, mode ImportMode) (*build.Package, 
 			Sfiles = append(Sfiles, tf.Name)
 			continue
 		default:
-			if list := fileListForExtBP(p, ext); list != nil {
+			if list := fileListForExt(p, ext); list != nil {
 				*list = append(*list, tf.Name)
 			}
 			continue
@@ -206,7 +206,7 @@ func Cook(ctxt build.Context, rp *RawPackage, mode ImportMode) (*build.Package, 
 			})
 		}
 
-		if mode&ImportComment != 0 {
+		if mode&build.ImportComment != 0 {
 			com, err := strconv.Unquote(tf.QuotedImportComment)
 			if err != nil {
 				badFile(tf.Name, fmt.Errorf("%s:%d: cannot parse import comment", tf.Name, tf.QuotedImportCommentLine))
