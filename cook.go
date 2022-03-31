@@ -1,6 +1,7 @@
 package index
 
 import (
+	"errors"
 	"fmt"
 	"go/build"
 	"go/build/constraint"
@@ -25,8 +26,8 @@ func Cook(ctxt build.Context, rp *RawPackage, mode ImportMode) (*build.Package, 
 		ImportPath: rp.Path,
 		Dir:        rp.SrcDir,
 	}
-	if rp.Error != nil {
-		return p, rp.Error
+	if rp.Error != "" {
+		return p, errors.New(rp.Error)
 	}
 
 	const path = "." // TODO(matloob): clean this up; ImportDir calls ctxt.Import with path == "."
@@ -117,11 +118,11 @@ func Cook(ctxt build.Context, rp *RawPackage, mode ImportMode) (*build.Package, 
 	xTestImportPos := make(map[string][]token.Position)
 	allTags := make(map[string]bool)
 	for _, tf := range rp.SourceFiles {
-		if tf.Error != nil {
-			badFile(tf.Name, tf.Error)
+		if tf.Error != "" {
+			badFile(tf.Name, errors.New(tf.Error))
 			continue
-		} else if tf.ParseError != nil {
-			badFile(tf.Name, tf.ParseError)
+		} else if tf.ParseError != "" {
+			badFile(tf.Name, errors.New(tf.ParseError))
 			// Fall through: we might still have a partial AST in info.parsed,
 			// and we want to list files with parse errors anyway.
 		}

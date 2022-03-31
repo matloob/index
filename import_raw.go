@@ -25,8 +25,8 @@ type TaggedFile struct {
 	Imports                 []TFImport
 	Embeds                  map[string][]token.Position
 
-	Error      error
-	ParseError error //
+	Error      string
+	ParseError string //
 }
 
 type TFImport struct {
@@ -40,7 +40,7 @@ type RawPackage struct {
 	// TODO(matloob): Do we need AllTags in RawPackage?
 	// We can produce it from contstraints when we evaluate them.
 
-	Error error
+	Error string
 
 	// Arguments to build.Import. Is path always "."?
 	Path   string
@@ -58,6 +58,23 @@ type RawPackage struct {
 
 	// Source files
 	SourceFiles []*TaggedFile
+}
+
+type RawModule struct {
+	Dirs map[string]*RawPackage
+}
+
+func IndexModule(dir string) *RawModule {
+	rm := &RawModule{Dirs: make(map[string]*RawPackage)}
+	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if !d.IsDir() {
+			return nil
+		}
+		rel := strings.TrimPrefix(filepath.ToSlash(path[len(dir):]), "/")
+		rm.Dirs[rel] = ImportDirRaw(path)
+		return nil
+	})
+	return rm
 }
 
 func ImportDirRaw(dir string) *RawPackage {
@@ -86,7 +103,7 @@ func ImportRaw(path string, srcDir string) *RawPackage {
 		SrcDir: srcDir,
 	}
 	if path == "" {
-		p.Error = fmt.Errorf("import %q: invalid import path", path)
+		p.Error = fmt.Errorf("import %q: invalid import path", path).Error()
 		return p
 	}
 
@@ -94,7 +111,7 @@ func ImportRaw(path string, srcDir string) *RawPackage {
 		panic(path)
 	} else {
 		if srcDir == "" {
-			p.Error = fmt.Errorf("import %q: import relative to unknown directory", path)
+			p.Error = fmt.Errorf("import %q: import relative to unknown directory", path).Error()
 			return p
 		}
 		if !filepath.IsAbs(path) {
@@ -109,14 +126,14 @@ func ImportRaw(path string, srcDir string) *RawPackage {
 	// We need to do this before we return early on FindOnly flag.
 	if IsLocalImport(path) && !isDir(p.Dir) {
 		// package was not found
-		p.Error = fmt.Errorf("cannot find package %q in:\n\t%s", path, p.Dir)
+		p.Error = fmt.Errorf("cannot find package %q in:\n\t%s", path, p.Dir).Error()
 		return p
 	}
 
 	// TODO: use os.ReadDir
 	dirs, err := ioutil.ReadDir(p.Dir)
 	if err != nil {
-		p.Error = err
+		p.Error = err.Error()
 		return p
 	}
 
@@ -137,7 +154,7 @@ func ImportRaw(path string, srcDir string) *RawPackage {
 
 		info, err := getInfo(p.Dir, name, &p.BinaryOnly, fset)
 		if err != nil {
-			p.SourceFiles = append(p.SourceFiles, &TaggedFile{Name: name, Error: err})
+			p.SourceFiles = append(p.SourceFiles, &TaggedFile{Name: name, Error: err.Error()})
 			continue
 		} else if info == nil {
 			p.SourceFiles = append(p.SourceFiles, &TaggedFile{Name: name, IgnoreFile: true})
@@ -160,7 +177,7 @@ func ImportRaw(path string, srcDir string) *RawPackage {
 		}
 
 		if info.parseErr != nil {
-			tf.ParseError = info.parseErr
+			tf.ParseError = info.parseErr.Error()
 			// Fall through: we might still have a partial AST in info.parsed,
 			// and we want to list files with parse errors anyway.
 		}
