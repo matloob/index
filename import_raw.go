@@ -15,9 +15,10 @@ import (
 
 type TaggedFile struct {
 	Name                    string
-	Doc                     string // doc.Synopsis of package comment
+	Synopsis                string // doc.Synopsis of package comment... Compute synopsis on all of these?
 	PkgName                 string
 	IgnoreFile              bool // starts with _ or . or should otherwise always be ignored
+	BinaryOnly              bool // cannot be rebuilt from source (has //go:binary-only-package comment)
 	GoBuildConstraint       string
 	PlusBuildConstraints    []string
 	QuotedImportComment     string
@@ -46,18 +47,12 @@ type RawPackage struct {
 	Path   string
 	SrcDir string
 
-	Dir           string // directory containing package sources
-	Name          string // package name
-	ImportComment string // path in import comment on package statement
-	ImportPath    string // import path of package ("" if unknown)
-
-	ConflictDir string // this directory shadows Dir in $GOPATH
-	BinaryOnly  bool   // cannot be rebuilt from source (has //go:binary-only-package comment)
-
-	//TODO(matloob): turn not go file types into strings?
+	Dir string // directory containing package sources
 
 	// Source files
 	SourceFiles []*TaggedFile
+
+	// No ConflictDir-- only relevant togopath
 }
 
 type RawModule struct {
@@ -152,7 +147,7 @@ func ImportRaw(path string, srcDir string) *RawPackage {
 		name := d.Name()
 		ext := nameExt(name)
 
-		info, err := getInfo(p.Dir, name, &p.BinaryOnly, fset)
+		info, err := getInfo(p.Dir, name, fset)
 		if err != nil {
 			p.SourceFiles = append(p.SourceFiles, &TaggedFile{Name: name, Error: err.Error()})
 			continue
@@ -164,6 +159,7 @@ func ImportRaw(path string, srcDir string) *RawPackage {
 			Name:                 name,
 			GoBuildConstraint:    info.goBuildConstraint,
 			PlusBuildConstraints: info.plusBuildConstraints,
+			BinaryOnly:           info.binaryOnly,
 		}
 		if info.parsed != nil {
 			tf.PkgName = info.parsed.Name.Name
@@ -183,7 +179,7 @@ func ImportRaw(path string, srcDir string) *RawPackage {
 		}
 
 		if info.parsed != nil && info.parsed.Doc != nil {
-			tf.Doc = doc.Synopsis(info.parsed.Doc.Text())
+			tf.Synopsis = doc.Synopsis(info.parsed.Doc.Text())
 		}
 
 		qcom, line := findImportComment(data)
@@ -213,7 +209,7 @@ func isDir(path string) bool {
 
 type fileInfoPlus struct {
 	fileInfo
-	sawBinaryOnly        bool
+	binaryOnly           bool
 	goBuildConstraint    string
 	plusBuildConstraints []string
 }
@@ -230,7 +226,7 @@ type fileInfoPlus struct {
 //
 // If allTags is non-nil, matchFile records any encountered build tag
 // by setting allTags[tag] = true.
-func getInfo(dir, name string, binaryOnly *bool, fset *token.FileSet) (*fileInfoPlus, error) {
+func getInfo(dir, name string, fset *token.FileSet) (*fileInfoPlus, error) {
 	if strings.HasPrefix(name, "_") ||
 		strings.HasPrefix(name, ".") {
 		return nil, nil
@@ -258,13 +254,14 @@ func getInfo(dir, name string, binaryOnly *bool, fset *token.FileSet) (*fileInfo
 		return nil, err
 	}
 
+	// TODO(matloob) should we decide whether to ignore binary only here or in
+	var ignoreBinaryOnly bool
 	if strings.HasSuffix(name, ".go") {
 		err = readGoInfo(f, &info.fileInfo)
 		if strings.HasSuffix(name, "_test.go") {
-			binaryOnly = nil // ignore //go:binary-only-package comments in _test.go files
+			ignoreBinaryOnly = true // ignore //go:binary-only-package comments in _test.go files
 		}
 	} else {
-		binaryOnly = nil // ignore //go:binary-only-package comments in non-Go sources
 		info.header, err = readComments(f)
 	}
 	f.Close()
@@ -273,13 +270,13 @@ func getInfo(dir, name string, binaryOnly *bool, fset *token.FileSet) (*fileInfo
 	}
 
 	// Look for +build comments to accept or reject the file.
-	info.goBuildConstraint, info.plusBuildConstraints, info.sawBinaryOnly, err = getConstraints(info.header)
+	info.goBuildConstraint, info.plusBuildConstraints, info.binaryOnly, err = getConstraints(info.header)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %v", name, err)
 	}
 
-	if binaryOnly != nil && info.sawBinaryOnly {
-		*binaryOnly = true
+	if ignoreBinaryOnly && info.binaryOnly {
+		info.binaryOnly = false // override info.binaryOnly
 	}
 
 	return info, nil
@@ -318,18 +315,4 @@ func getConstraints(content []byte) (goBuild string, plusBuild []string, binaryO
 	}
 
 	return string(goBuildBytes), plusBuild, sawBinaryOnly, nil
-}
-
-func TODOToExpand() {
-	/*
-		var pkg string
-		if info.parsed != nil {
-			pkg = info.parsed.Name.Name
-			if pkg == "documentation" {
-				p.IgnoredGoFiles = append(p.IgnoredGoFiles, name)
-				continue
-			}
-		}
-
-	*/
 }

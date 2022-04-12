@@ -7,8 +7,11 @@ import (
 	"io/fs"
 	"math/rand"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -330,23 +333,6 @@ func main() {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("\t\t", "\t")
 
-	var pass, all int
-
-	rand.Seed(time.Now().UnixNano())
-
-	var actualTags []string
-	for _, tag := range globalAllTags {
-		if rand.Intn(2) != 0 {
-			actualTags = append(actualTags, tag)
-		}
-	}
-
-	fmt.Println("actual tags are")
-	fmt.Println(actualTags)
-
-	ctx := build.Default
-	ctx.BuildTags = actualTags
-
 	modules := make(map[module.Version]*index.RawModule)
 
 	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
@@ -369,57 +355,163 @@ func main() {
 		modules[modVers] = &ind2
 		return filepath.SkipDir
 	})
-
 	fmt.Println("done indexing")
 
-	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if path == modcachecache {
-			return filepath.SkipDir
-		}
-		if !d.IsDir() {
+	try := func(ctx build.Context) {
+		var pass, all int
+
+		filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if path == modcachecache {
+				return filepath.SkipDir
+			}
+			if !d.IsDir() {
+				return nil
+			}
+
+			v, pkgpath, ok := modVers(modcache, path)
+			if !ok {
+				return nil
+			}
+
+			all++
+
+			got, gotErr := index.Cook(ctx, modules[v].Dirs[pkgpath], 0)
+			// got, gotErr := getPackageRC(path)
+			want, wantErr := ctx.ImportDir(path, 0)
+
+			if gotErr != nil || wantErr != nil {
+				if (gotErr == nil) != (wantErr == nil) || gotErr.Error() != wantErr.Error() {
+					fmt.Printf("ERROR(%s): got error %v; want error %v\n", path, gotErr, wantErr)
+				}
+			}
+			if !reflect.DeepEqual(got, want) {
+				fmt.Println("ERROR(" + path + ")\n\tgot package")
+				enc.Encode(got)
+				got, _ := json.MarshalIndent(got, "", "\t")
+
+				fmt.Println("\twant package")
+				enc.Encode(want)
+				want, _ := json.MarshalIndent(want, "", "\t")
+				b, _ := diff.Diff("", got, want)
+				os.Stdout.Write(b)
+				return nil
+			}
+			pass++
 			return nil
+		})
+		if pass == all {
+			fmt.Print("PASS", ctx.GOOS, " ", ctx.GOARCH, ctx.BuildTags, ctx.CgoEnabled)
+		} else {
+			fmt.Print("FAIL", ctx.GOOS, " ", ctx.GOARCH, ctx.BuildTags, ctx.CgoEnabled)
 		}
+		fmt.Printf(" %v/%v passing packages\n", pass, all)
+	}
 
-		v, pkgpath, ok := modVers(modcache, path)
-		if !ok {
-			return nil
-		}
+	rand.Seed(time.Now().UnixNano())
 
-		all++
-
-		got, gotErr := index.Cook(ctx, modules[v].Dirs[pkgpath], 0)
-		// got, gotErr := getPackageRC(path)
-		want, wantErr := ctx.ImportDir(path, 0)
-
-		if gotErr != nil || wantErr != nil {
-			if (gotErr == nil) != (wantErr == nil) || gotErr.Error() != wantErr.Error() {
-				fmt.Printf("ERROR(%s): got error %v; want error %v\n", path, gotErr, wantErr)
+	for goos := range knownOS {
+		for goarch := range knownArch {
+			for _, cgo := range []bool{true, false} {
+				ctx := getContext(goos, goarch, []string{}, cgo)
+				try(ctx)
 			}
 		}
-		if !reflect.DeepEqual(got, want) {
-			fmt.Println("ERROR(" + path + ")\n\tgot package")
-			enc.Encode(got)
-			got, _ := json.MarshalIndent(got, "", "\t")
-
-			fmt.Println("\twant package")
-			enc.Encode(want)
-			want, _ := json.MarshalIndent(want, "", "\t")
-			b, _ := diff.Diff("", got, want)
-			os.Stdout.Write(b)
-			return nil
-		}
-		pass++
-		return nil
-	})
-	if pass == all {
-		fmt.Print("PASS")
-	} else {
-		fmt.Print("FAIL")
 	}
-	fmt.Printf(" %v/%v passing packages\n", pass, all)
+
+	/*
+		var actualTags []string
+
+		for _, tag := range globalAllTags {
+			if !knownOS[tag] && !knownArch[tag] && !strings.HasPrefix(tag, "go") {
+				if rand.Intn(10) == 0 {
+					actualTags = append(actualTags, tag)
+				}
+			}
+		}
+		var actualTagsMap = make(map[string]bool)
+		for _, t := range actualTags {
+			actualTagsMap[t] = true
+		}
+
+		fmt.Println("actual tags are")
+		fmt.Println(actualTags)
+
+		cgo := rand.Intn(2) == 0
+	*/
+
 }
 
 func getPackageRC(path string) (*build.Package, error) {
 	// mode seems to be zero for ModulesEnabled
 	return index.Cook(build.Default, index.ImportDirRaw(path), 0)
+}
+
+var knownOS = map[string]bool{
+	"aix":       true,
+	"android":   true,
+	"darwin":    true,
+	"dragonfly": true,
+	"freebsd":   true,
+	"hurd":      true,
+	"illumos":   true,
+	"ios":       true,
+	"js":        true,
+	"linux":     true,
+	"nacl":      true,
+	"netbsd":    true,
+	"openbsd":   true,
+	"plan9":     true,
+	"solaris":   true,
+	"windows":   true,
+	"zos":       true,
+}
+var knownArch = map[string]bool{
+	"386":         true,
+	"amd64":       true,
+	"amd64p32":    true,
+	"arm":         true,
+	"armbe":       true,
+	"arm64":       true,
+	"arm64be":     true,
+	"loong64":     true,
+	"mips":        true,
+	"mipsle":      true,
+	"mips64":      true,
+	"mips64le":    true,
+	"mips64p32":   true,
+	"mips64p32le": true,
+	"ppc":         true,
+	"ppc64":       true,
+	"ppc64le":     true,
+	"riscv":       true,
+	"riscv64":     true,
+	"s390":        true,
+	"s390x":       true,
+	"sparc":       true,
+	"sparc64":     true,
+	"wasm":        true,
+}
+
+func getContext(goos, goarch string, tags []string, cgo bool) build.Context {
+	var c build.Context
+
+	c.GOARCH = goarch
+	c.GOOS = goos
+	c.GOROOT = pathpkg.Clean(runtime.GOROOT())
+	c.GOPATH = build.Default.GOPATH
+	c.Compiler = runtime.Compiler
+
+	// Each major Go release in the Go 1.x series adds a new
+	// "go1.x" release tag. That is, the go1.x tag is present in
+	// all releases >= Go 1.x. Code that requires Go 1.x or later
+	// should say "+build go1.x", and code that should only be
+	// built before Go 1.x (perhaps it is the stub to use in that
+	// case) should say "+build !go1.x".
+	// The last element in ReleaseTags is the current release.
+	for i := 1; i <= 18; i++ {
+		c.ReleaseTags = append(c.ReleaseTags, "go1."+strconv.Itoa(i))
+	}
+
+	c.CgoEnabled = cgo
+	return c
 }

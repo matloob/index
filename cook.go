@@ -20,7 +20,6 @@ import (
 // TODO(matloob): take build.Context instead... for later...?
 
 // Assumption: directory is in module cache.
-
 func Cook(ctxt build.Context, rp *RawPackage, mode build.ImportMode) (*build.Package, error) {
 	p := &build.Package{
 		ImportPath: rp.Path,
@@ -60,7 +59,6 @@ func Cook(ctxt build.Context, rp *RawPackage, mode build.ImportMode) (*build.Pac
 	}
 	setPkga()
 
-	binaryOnly := false
 	pkga = "" // local imports have no installed path
 	if srcDir == "" {
 		return p, fmt.Errorf("import %q: import relative to unknown directory", path)
@@ -88,10 +86,6 @@ func Cook(ctxt build.Context, rp *RawPackage, mode build.ImportMode) (*build.Pac
 	}
 
 	if mode&build.FindOnly != 0 {
-		return p, pkgerr
-	}
-	// TODO(matloob): remove this? impossible for binaryOnly to be set here...
-	if binaryOnly && (mode&build.AllowBinary) != 0 {
 		return p, pkgerr
 	}
 
@@ -187,9 +181,13 @@ func Cook(ctxt build.Context, rp *RawPackage, mode build.ImportMode) (*build.Pac
 			pkg = pkg[:len(pkg)-len("_test")]
 		}
 
+		if !isTest && tf.BinaryOnly {
+			p.BinaryOnly = true
+		}
+
 		// Grab the first package comment as docs, provided it is not from a test file.
-		if tf.Doc != "" && p.Doc == "" && !isTest && !isXTest {
-			p.Doc = tf.Doc
+		if tf.Synopsis != "" && p.Doc == "" && !isTest && !isXTest {
+			p.Doc = tf.Synopsis
 		}
 
 		if p.Name == "" {
@@ -307,7 +305,6 @@ func Cook(ctxt build.Context, rp *RawPackage, mode build.ImportMode) (*build.Pac
 	return p, pkgerr
 }
 
-/////
 ///// TODO(matloob) delete all this stuff if we end up merging back into go/build
 
 // joinPath calls joinPath (if not nil) or else filepath.Join.
