@@ -5,11 +5,21 @@ import (
 	"encoding/binary"
 	"go/token"
 	"io"
+	"path/filepath"
 	"sort"
 )
 
 // Todo(matloob) write straight to file? Much easier to poke in the
-func EncodeModule(packages []*RawPackage) ([]byte, error) {
+func EncodeModule(packages []*RawPackage, moddir string) ([]byte, error) {
+	// fix up dir
+	for i := range packages {
+		rel, err := filepath.Rel(moddir, packages[i].Dir)
+		if err != nil {
+			return nil, err
+		}
+		packages[i].Dir = rel
+	}
+
 	e := newEncoder()
 	e.Bytes([]byte("go index v0\n"))
 	stringTableOffsetPos := e.Pos() // fill this at the end
@@ -55,11 +65,14 @@ func writePackage(e *encoder, p *RawPackage) {
 func writeSourceFile(e *encoder, p *TaggedFile) {
 	e.String(p.Error)
 	e.String(p.ParseError)
+	e.String(p.Synopsis)
 	e.String(p.Name)
 	e.String(p.PkgName)
 	e.Bool(p.IgnoreFile)
+	e.Bool(p.BinaryOnly)
 	e.String(p.QuotedImportComment)
 	e.Uint32(uint32(p.QuotedImportCommentLine))
+	e.String(p.GoBuildConstraint)
 
 	e.Uint32(uint32(len(p.PlusBuildConstraints)))
 	for _, s := range p.PlusBuildConstraints {
@@ -95,7 +108,11 @@ type embed struct {
 
 func newEncoder() *encoder {
 	e := &encoder{strings: make(map[string]uint32)}
-	e.String("") // place the empty string at position 0 in the string table
+
+	// place the empty string at position 0 in the string table
+	e.stringTable.WriteByte(0)
+	e.strings[""] = 0
+
 	return e
 }
 
@@ -123,6 +140,7 @@ func (e *encoder) Bytes(b []byte) {
 func (e *encoder) String(s string) {
 	if n, ok := e.strings[s]; ok {
 		e.Uint32(n)
+		return
 	}
 	pos := uint32(e.stringTable.Len())
 	e.strings[s] = pos

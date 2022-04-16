@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"go/build"
 	"io/fs"
+	"io/ioutil"
+	"log"
 	"math/rand"
 	"os"
 	pathpkg "path"
@@ -333,7 +335,13 @@ func main() {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("\t\t", "\t")
 
-	modules := make(map[module.Version]*index.RawModule)
+	tmpDir, err := ioutil.TempDir("", "")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("tmpdir is", tmpDir)
+
+	modules := make(map[module.Version]*index.ModuleIndex)
 
 	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if path == modcachecache {
@@ -346,13 +354,22 @@ func main() {
 		if !ok {
 			return nil
 		}
-		ind := index.IndexModule(path)
-		// roundtrip it
-		mm, err := json.MarshalIndent(ind, "", "\t")
-		var ind2 index.RawModule
-		json.Unmarshal(mm, &ind2)
-		_ = ind2
-		modules[modVers] = &ind2
+		rm := index.IndexModule(path)
+		fmt.Println(modVers, path)
+		indexfiledir := filepath.Join(tmpDir, modVers.String())
+		os.MkdirAll(indexfiledir, 755)
+		indexfilepath := filepath.Join(indexfiledir, "go.index")
+		fmt.Println("*", indexfilepath)
+		err = WriteIndexRawModule(indexfilepath, rm, path)
+		if err != nil {
+			log.Fatal("ppp", err)
+		}
+
+		// open module index
+		modules[modVers], err = index.Open(indexfilepath, filepath.Join(path, "go.index"))
+		if err != nil {
+			log.Fatal(err)
+		}
 		return filepath.SkipDir
 	})
 	fmt.Println("done indexing")
@@ -369,13 +386,14 @@ func main() {
 			}
 
 			v, pkgpath, ok := modVers(modcache, path)
+			_ = pkgpath
 			if !ok {
 				return nil
 			}
 
 			all++
 
-			got, gotErr := index.Cook(ctx, modules[v].Dirs[pkgpath], 0)
+			got, gotErr := modules[v].ImportPackage(ctx, path, 0)
 			// got, gotErr := getPackageRC(path)
 			want, wantErr := ctx.ImportDir(path, 0)
 
@@ -514,4 +532,19 @@ func getContext(goos, goarch string, tags []string, cgo bool) build.Context {
 
 	c.CgoEnabled = cgo
 	return c
+}
+
+// Remove me... this is for tryitout.
+func WriteIndexRawModule(filepath string, rm *index.RawModule, moduleDir string) error {
+	var packages []*index.RawPackage
+	for _, m := range rm.Dirs {
+		packages = append(packages, m)
+	}
+	b, err := index.EncodeModule(packages, moduleDir)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("writing file", filepath)
+	return ioutil.WriteFile(filepath, b, 0644)
 }

@@ -7,12 +7,14 @@ import (
 	"go/token"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 type ModuleIndex struct {
 	f        *os.File
+	moddir   string
 	st       *stringTable
-	packages map[string]*pkgInfo
+	packages map[string]pkgInfo
 }
 
 type pkgInfo struct {
@@ -21,13 +23,15 @@ type pkgInfo struct {
 	rawPkgData *RawPackage2
 }
 
-func DoModuleIndex(path string) (mi *ModuleIndex, err error) {
+func Open(path string, futurepath string) (mi *ModuleIndex, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 
-	mi = &ModuleIndex{f: f}
+	moddir := filepath.Dir(futurepath)
+
+	mi = &ModuleIndex{f: f, moddir: moddir}
 
 	defer func() {
 		if e := recover(); e != nil {
@@ -50,7 +54,6 @@ func DoModuleIndex(path string) (mi *ModuleIndex, err error) {
 	}
 	mi.st = newStringTable(stbytes)
 	numPackages := int(mi.uint32())
-	fmt.Println("numPackages is", numPackages)
 
 	pkgInfos := make([]pkgInfo, numPackages)
 
@@ -59,6 +62,10 @@ func DoModuleIndex(path string) (mi *ModuleIndex, err error) {
 	}
 	for i := 0; i < numPackages; i++ {
 		pkgInfos[i].offset = mi.uint32()
+	}
+	mi.packages = make(map[string]pkgInfo)
+	for i := range pkgInfos {
+		mi.packages[pkgInfos[i].dir] = pkgInfos[i]
 	}
 
 	return mi, nil
@@ -77,7 +84,7 @@ func (mi *ModuleIndex) RawPackage(path string) (*RawPackage2, bool) {
 	rp.SrcDir = mi.string()
 	rp.Dir = mi.string()
 	numSourceFiles := mi.uint32()
-	rp.SourceFiles = make([]*SourceFile, numSourceFiles)
+	rp.SourceFiles = make([]SourceFile, numSourceFiles)
 	for i := uint32(0); i < numSourceFiles; i++ {
 		rp.SourceFiles[i].mi = mi
 		rp.SourceFiles[i].offset = mi.uint32()
@@ -98,7 +105,7 @@ type RawPackage2 struct {
 	Dir string // directory containing package sources
 
 	// Source files
-	SourceFiles []*SourceFile
+	SourceFiles []SourceFile
 
 	// No ConflictDir-- only relevant togopath
 }
@@ -116,18 +123,15 @@ type SourceFile struct {
 const (
 	sourceFileErrorOffset = 4 * iota
 	sourceFileParseError
-	sourceFileName
 	sourceFileSynopsis
+	sourceFileName
 	sourceFilePkgName
 	sourceFileIgnoreFile
+	sourceFileBinaryOnly
 	sourceFileQuotedImportComment
 	sourceFileQuotedImportCommentLine
 	sourceFileGoBuildConstraint
 	sourceFileNumPlusBuildConstraints
-
-	// These two are not at a constant offset from the beginning
-	sourceFileImports
-	sourceFileEmbeds
 )
 
 func (sf *SourceFile) error() string {
@@ -151,14 +155,11 @@ func (sf *SourceFile) pkgName() string {
 }
 
 func (sf *SourceFile) ignoreFile() bool {
-	switch v := sf.mi.uint32At(sf.offset + sourceFileIgnoreFile); v {
-	case 0:
-		return false
-	case 1:
-		return true
-	default:
-		panic(fmt.Errorf("invalid bool value for SourceFile.IgnoreFile:", v))
-	}
+	return sf.mi.boolAt(sf.offset + sourceFileIgnoreFile)
+}
+
+func (sf *SourceFile) binaryOnly() bool {
+	return sf.mi.boolAt(sf.offset + sourceFileBinaryOnly)
 }
 
 func (sf *SourceFile) quotedImportComment() string {
@@ -205,7 +206,7 @@ func (sf *SourceFile) embedsOffset() uint32 {
 	return sf.savedEmbedsOffset
 }
 
-func (sf *SourceFile) Imports() []TFImport {
+func (sf *SourceFile) imports() []TFImport {
 	var ret []TFImport
 
 	importsOffset := sf.importsOffset()
@@ -237,7 +238,7 @@ func (da *decoderAt) tokpos() token.Position {
 	}
 }
 
-func (sf *SourceFile) Embeds() []embed {
+func (sf *SourceFile) embeds() []embed {
 	var ret []embed
 
 	embedsOffset := sf.embedsOffset()
@@ -277,7 +278,7 @@ func (mi *ModuleIndex) uint32() uint32 {
 }
 
 func (mi *ModuleIndex) uint32At(offset uint32) uint32 {
-	b := make([]byte, 0, 4)
+	b := make([]byte, 4)
 	if _, err := mi.f.ReadAt(b, int64(offset)); err != nil {
 		panic(err)
 	}
@@ -286,6 +287,17 @@ func (mi *ModuleIndex) uint32At(offset uint32) uint32 {
 		panic(err)
 	}
 	return n
+}
+
+func (mi *ModuleIndex) boolAt(offset uint32) bool {
+	switch v := mi.uint32At(offset); v {
+	case 0:
+		return false
+	case 1:
+		return true
+	default:
+		panic(fmt.Errorf("invalid bool value for SourceFile.IgnoreFile:", v))
+	}
 }
 
 func (mi *ModuleIndex) Close() error {

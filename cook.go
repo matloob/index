@@ -305,6 +305,306 @@ func Cook(ctxt build.Context, rp *RawPackage, mode build.ImportMode) (*build.Pac
 	return p, pkgerr
 }
 
+func (mi *ModuleIndex) ImportPackage(ctxt build.Context, reldir string, mode build.ImportMode) (*build.Package, error) {
+	// TODO(matloob): dir should be relative to mi. join dir with mi's dir for full directory
+	dir := reldir
+
+	rp, ok := mi.RawPackage(dir)
+	if !ok {
+		return &build.Package{
+			ImportPath: ".",
+			Dir:        dir,
+		}, fmt.Errorf("cannot find package . in:\n\t%s", dir)
+	}
+
+	p := &build.Package{
+		ImportPath: rp.Path,
+		Dir:        rp.SrcDir,
+	}
+	if rp.Error != "" {
+		return p, errors.New(rp.Error)
+	}
+
+	const path = "." // TODO(matloob): clean this up; ImportDir calls ctxt.Import with path == "."
+	srcDir := rp.SrcDir
+
+	var pkgtargetroot string
+	var pkga string
+	var pkgerr error
+	suffix := ""
+	if ctxt.InstallSuffix != "" {
+		suffix = "_" + ctxt.InstallSuffix
+	}
+	switch ctxt.Compiler {
+	case "gccgo":
+		pkgtargetroot = "pkg/gccgo_" + ctxt.GOOS + "_" + ctxt.GOARCH + suffix
+	case "gc":
+		pkgtargetroot = "pkg/" + ctxt.GOOS + "_" + ctxt.GOARCH + suffix
+	default:
+		// Save error for end of function.
+		pkgerr = fmt.Errorf("import %q: unknown compiler %q", path, ctxt.Compiler)
+	}
+	setPkga := func() {
+		switch ctxt.Compiler {
+		case "gccgo":
+			dir, elem := pathpkg.Split(p.ImportPath)
+			pkga = pkgtargetroot + "/" + dir + "lib" + elem + ".a"
+		case "gc":
+			pkga = pkgtargetroot + "/" + p.ImportPath + ".a"
+		}
+	}
+	setPkga()
+
+	pkga = "" // local imports have no installed path
+	if srcDir == "" {
+		return p, fmt.Errorf("import %q: import relative to unknown directory", path)
+	}
+	if !isAbsPath(path) {
+		p.Dir = joinPath(srcDir, path)
+	}
+	// p.Dir directory may or may not exist. Gather partial information first, check if it exists later.
+	// Determine canonical import path, if any.
+	// Exclude results where the import path would include /testdata/.
+
+	// Assumption: directory is in the module cache.
+
+	// It's okay that we didn't find a root containing dir.
+	// Keep going with the information we have.
+
+	if p.Root != "" {
+		p.SrcRoot = joinPath(p.Root, "src")
+		p.PkgRoot = joinPath(p.Root, "pkg")
+		p.BinDir = joinPath(p.Root, "bin")
+		if pkga != "" {
+			p.PkgTargetRoot = joinPath(p.Root, pkgtargetroot)
+			p.PkgObj = joinPath(p.Root, pkga)
+		}
+	}
+
+	if mode&build.FindOnly != 0 {
+		return p, pkgerr
+	}
+
+	// We need to do a second round of bad file processing.
+	var badGoError error
+	badFiles := make(map[string]bool)
+	badFile := func(name string, err error) {
+		if badGoError == nil {
+			badGoError = err
+		}
+		if !badFiles[name] {
+			p.InvalidGoFiles = append(p.InvalidGoFiles, name)
+			badFiles[name] = true
+		}
+	}
+
+	var Sfiles []string // files with ".S"(capital S)/.sx(capital s equivalent for case insensitive filesystems)
+	var firstFile, firstCommentFile string
+	embedPos := make(map[string][]token.Position)
+	testEmbedPos := make(map[string][]token.Position)
+	xTestEmbedPos := make(map[string][]token.Position)
+	importPos := make(map[string][]token.Position)
+	testImportPos := make(map[string][]token.Position)
+	xTestImportPos := make(map[string][]token.Position)
+	allTags := make(map[string]bool)
+	for _, tf := range rp.SourceFiles {
+		name := tf.name()
+		if error := tf.error(); error != "" {
+			badFile(name, errors.New(tf.error()))
+			continue
+		} else if parseError := tf.parseError(); parseError != "" {
+			badFile(name, errors.New(tf.parseError()))
+			// Fall through: we might still have a partial AST in info.parsed,
+			// and we want to list files with parse errors anyway.
+		}
+
+		var shouldBuild = true
+		if !goodOSArchFile(ctxt, name, allTags) && !ctxt.UseAllFiles {
+			shouldBuild = false
+		} else if goBuildConstraint := tf.goBuildConstraint(); goBuildConstraint != "" {
+			x, err := constraint.Parse(goBuildConstraint)
+			if err != nil {
+				return nil, fmt.Errorf("%s: parsing //go:build line: %v", name, err)
+			}
+			shouldBuild = eval(ctxt, x, allTags)
+		} else if plusBuildConstraints := tf.plusBuildConstraints(); len(plusBuildConstraints) > 0 {
+			for _, text := range plusBuildConstraints {
+				if x, err := constraint.Parse(text); err == nil {
+					if !eval(ctxt, x, allTags) {
+						shouldBuild = false
+					}
+				}
+			}
+		}
+
+		ext := nameExt(name)
+		if !shouldBuild || tf.ignoreFile() {
+			if strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".") {
+				// not due to build constraints - don't report
+			} else if ext == ".go" {
+				p.IgnoredGoFiles = append(p.IgnoredGoFiles, name)
+			} else if fileListForExt(p, ext) != nil {
+				p.IgnoredOtherFiles = append(p.IgnoredOtherFiles, name)
+			}
+			continue
+		}
+		
+		// Going to save the file. For non-Go files, can stop here.
+		switch ext {
+		case ".go":
+			// keep going
+		case ".S", ".sx":
+			// special case for cgo, handled at end
+			Sfiles = append(Sfiles, name)
+			continue
+		default:
+			if list := fileListForExt(p, ext); list != nil {
+				*list = append(*list, name)
+			}
+			continue
+		}
+
+		// TODO(matloob): determine pkg name here? pkg variable
+
+		pkg := tf.pkgName()
+		if pkg == "documentation" {
+			p.IgnoredGoFiles = append(p.IgnoredGoFiles, name)
+			continue
+		}
+		isTest := strings.HasSuffix(name, "_test.go")
+		isXTest := false
+		if isTest && strings.HasSuffix(tf.pkgName(), "_test") && p.Name != tf.pkgName() {
+			isXTest = true
+			pkg = pkg[:len(pkg)-len("_test")]
+		}
+
+		if !isTest && tf.binaryOnly() {
+			p.BinaryOnly = true
+		}
+
+		// Grab the first package comment as docs, provided it is not from a test file.
+		if p.Doc == "" && !isTest && !isXTest {
+			if synopsis := tf.synopsis(); synopsis != "" {
+				p.Doc = synopsis
+			}
+		}
+
+		if p.Name == "" {
+			p.Name = pkg
+			firstFile = name
+		} else if pkg != p.Name {
+			// TODO(#45999): The choice of p.Name is arbitrary based on file iteration
+			// order. Instead of resolving p.Name arbitrarily, we should clear out the
+			// existing name and mark the existing files as also invalid.
+			badFile(name, &MultiplePackageError{
+				Dir:      p.Dir,
+				Packages: []string{p.Name, pkg},
+				Files:    []string{firstFile, name},
+			})
+		}
+
+		if mode&build.ImportComment != 0 {
+			com, err := strconv.Unquote(tf.quotedImportComment())
+			if err != nil {
+				badFile(name, fmt.Errorf("%s:%d: cannot parse import comment", name, tf.quotedImportCommentLine()))
+			} else if p.ImportComment == "" {
+				p.ImportComment = com
+				firstCommentFile = name
+			} else if p.ImportComment != com {
+				badFile(name, fmt.Errorf("found import comments %q (%s) and %q (%s) in %s", p.ImportComment, firstCommentFile, com, name, p.Dir))
+			}
+		}
+
+		// Record imports and information about cgo.
+		isCgo := false
+		imports := tf.imports()
+		for _, imp := range imports {
+			if imp.Path == "C" {
+				if isTest {
+					badFile(name, fmt.Errorf("use of cgo in test %s not supported", name))
+					continue
+				}
+				isCgo = true
+
+				if imp.Doc != "" {
+					if err := saveCgo(ctxt, name, p, imp.Doc); err != nil {
+						badFile(name, err)
+					}
+				}
+
+			}
+		}
+
+		var fileList *[]string
+		var importMap, embedMap map[string][]token.Position
+		switch {
+		case isCgo:
+			allTags["cgo"] = true
+			if ctxt.CgoEnabled {
+				fileList = &p.CgoFiles
+				importMap = importPos
+				embedMap = embedPos
+			} else {
+				// Ignore imports and embeds from cgo files if cgo is disabled.
+				fileList = &p.IgnoredGoFiles
+			}
+		case isXTest:
+			fileList = &p.XTestGoFiles
+			importMap = xTestImportPos
+			embedMap = xTestEmbedPos
+		case isTest:
+			fileList = &p.TestGoFiles
+			importMap = testImportPos
+			embedMap = testEmbedPos
+		default:
+			fileList = &p.GoFiles
+			importMap = importPos
+			embedMap = embedPos
+		}
+		*fileList = append(*fileList, name)
+		if importMap != nil {
+			for _, imp := range imports {
+				importMap[imp.Path] = append(importMap[imp.Path], imp.Position)
+			}
+		}
+		if embedMap != nil {
+			for _, e := range tf.embeds() {
+				embedMap[e.pattern] = append(embedMap[e.pattern], e.position)
+			}
+		}
+	}
+
+	p.EmbedPatterns, p.EmbedPatternPos = cleanDecls(embedPos)
+	p.TestEmbedPatterns, p.TestEmbedPatternPos = cleanDecls(testEmbedPos)
+	p.XTestEmbedPatterns, p.XTestEmbedPatternPos = cleanDecls(xTestEmbedPos)
+
+	p.Imports, p.ImportPos = cleanDecls(importPos)
+	p.TestImports, p.TestImportPos = cleanDecls(testImportPos)
+	p.XTestImports, p.XTestImportPos = cleanDecls(xTestImportPos)
+
+	for tag := range allTags {
+		p.AllTags = append(p.AllTags, tag)
+	}
+	sort.Strings(p.AllTags)
+
+	if len(p.CgoFiles) > 0 {
+		p.SFiles = append(p.SFiles, Sfiles...)
+		sort.Strings(p.SFiles)
+	} else {
+		p.IgnoredOtherFiles = append(p.IgnoredOtherFiles, Sfiles...)
+		sort.Strings(p.IgnoredOtherFiles)
+	}
+	// TODO Remove SFiles if we're not using cgo.
+
+	if badGoError != nil {
+		return p, badGoError
+	}
+	if len(p.GoFiles)+len(p.CgoFiles)+len(p.TestGoFiles)+len(p.XTestGoFiles) == 0 {
+		return p, &NoGoError{p.Dir}
+	}
+	return p, pkgerr
+}
+
 ///// TODO(matloob) delete all this stuff if we end up merging back into go/build
 
 // joinPath calls joinPath (if not nil) or else filepath.Join.
