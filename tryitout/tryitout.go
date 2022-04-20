@@ -461,11 +461,6 @@ func main() {
 
 }
 
-func getPackageRC(path string) (*build.Package, error) {
-	// mode seems to be zero for ModulesEnabled
-	return index.Cook(build.Default, index.ImportDirRaw(path), 0)
-}
-
 var knownOS = map[string]bool{
 	"aix":       true,
 	"android":   true,
