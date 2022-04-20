@@ -305,9 +305,15 @@ func Cook(ctxt build.Context, rp *RawPackage, mode build.ImportMode) (*build.Pac
 	return p, pkgerr
 }
 
-func (mi *ModuleIndex) ImportPackage(ctxt build.Context, reldir string, mode build.ImportMode) (*build.Package, error) {
+func (mi *ModuleIndex) ImportPackage(ctxt build.Context, reldir string, mode build.ImportMode) (_ *build.Package, err error) {
 	// TODO(matloob): dir should be relative to mi. join dir with mi's dir for full directory
 	dir := reldir
+
+	defer func() {
+		if e := recover(); e != nil {
+			err = fmt.Errorf("error reading module index: %v", e)
+		}
+	}()
 
 	rp, ok := mi.RawPackage(dir)
 	if !ok {
@@ -448,7 +454,7 @@ func (mi *ModuleIndex) ImportPackage(ctxt build.Context, reldir string, mode bui
 			}
 			continue
 		}
-		
+
 		// Going to save the file. For non-Go files, can stop here.
 		switch ext {
 		case ".go":

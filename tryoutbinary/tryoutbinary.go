@@ -28,7 +28,10 @@ func main() {
 }
 
 func writeModulesTo(moduleDir string, outfile string) error {
-	rawModule := index.IndexModule(moduleDir)
+	rawModule, err := index.IndexModule(moduleDir)
+	if err != nil {
+		return err
+	}
 	return WriteIndexRawModule(outfile, rawModule, moduleDir)
 }
 

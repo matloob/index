@@ -354,8 +354,10 @@ func main() {
 		if !ok {
 			return nil
 		}
-		rm := index.IndexModule(path)
-		fmt.Println(modVers, path)
+		rm, err := index.IndexModule(path)
+		if err != nil {
+			log.Fatal(err)
+		}
 		indexfiledir := filepath.Join(tmpDir, modVers.String())
 		os.MkdirAll(indexfiledir, 755)
 		indexfilepath := filepath.Join(indexfiledir, "go.index")

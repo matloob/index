@@ -190,8 +190,8 @@ func (sf *SourceFile) importsOffset() uint32 {
 	if sf.savedImportsOffset != 0 {
 		return sf.savedImportsOffset
 	}
-	numPlusBuildConstraints := sf.mi.uint32At(sourceFileNumPlusBuildConstraints)
-	sf.savedImportsOffset = sourceFileNumPlusBuildConstraints + 4*(numPlusBuildConstraints+1) // 4 bytes per uin32, add one to advance past numPlusBuildConstraints itself
+	numPlusBuildConstraints := sf.mi.uint32At(sf.offset + sourceFileNumPlusBuildConstraints)
+	sf.savedImportsOffset = sf.offset + sourceFileNumPlusBuildConstraints + 4*(numPlusBuildConstraints+1) // 4 bytes per uin32, add one to advance past numPlusBuildConstraints itself
 	return sf.savedImportsOffset
 }
 

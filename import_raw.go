@@ -59,9 +59,12 @@ type RawModule struct {
 	Dirs map[string]*RawPackage
 }
 
-func IndexModule(dir string) *RawModule {
+func IndexModule(dir string) (*RawModule, error) {
 	rm := &RawModule{Dirs: make(map[string]*RawPackage)}
-	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
 		if !d.IsDir() {
 			return nil
 		}
@@ -69,7 +72,7 @@ func IndexModule(dir string) *RawModule {
 		rm.Dirs[rel] = ImportDirRaw(path)
 		return nil
 	})
-	return rm
+	return rm, err
 }
 
 func ImportDirRaw(dir string) *RawPackage {
